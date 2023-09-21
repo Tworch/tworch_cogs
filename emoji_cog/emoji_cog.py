@@ -7,7 +7,7 @@ from urllib.parse import urlparse, urljoin
 import asyncio
 import json
 import time
-import aioredis
+import redis  # Import the redis library
 
 # Constants for rate limiting (adjust as needed)
 RATE_LIMIT_SECONDS = 60  # Rate limit window in seconds
@@ -18,17 +18,15 @@ class EmojiCog(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=7465947364)  # Change the identifier to a unique value
         self.config.register_guild(allowed_roles=[])
-        
+
         # Rate limiting using Redis
-        self.redis = None
+        self.redis = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=True)  # Modify the connection parameters
         self.rate_limit_key = "emoji_cog_rate_limit"
-        
+
         self.session = aiohttp.ClientSession()
 
     async def cog_unload(self):
         await self.session.close()
-        if self.redis:
-            await self.redis.close()
 
     def is_valid_url(self, url):
         try:
@@ -76,24 +74,21 @@ class EmojiCog(commands.Cog):
     async def check_rate_limit(self, ctx):
         if not self.redis:
             return True
-        
+
         user_id = ctx.author.id
         current_time = time.time()
-        
+
         try:
-            rate_limit_info = await self.redis.hgetall(self.rate_limit_key, encoding="utf-8")
-            
-            # Remove requests that are older than the rate limit window
-            rate_limit_info = {k: float(v) for k, v in rate_limit_info.items() if current_time - float(v) <= RATE_LIMIT_SECONDS}
-            
-            if len(rate_limit_info) >= MAX_REQUESTS_PER_WINDOW:
+            # Get the number of requests made by the user within the rate limit window
+            user_requests = self.redis.zcount(self.rate_limit_key, current_time - RATE_LIMIT_SECONDS, '+inf')
+
+            if user_requests >= MAX_REQUESTS_PER_WINDOW:
                 # User has reached the rate limit
                 await ctx.send(f"You have reached the rate limit. Try again in {RATE_LIMIT_SECONDS} seconds.")
                 return False
             else:
-                # Add the current request time to the user's rate limit list
-                rate_limit_info[user_id] = current_time
-                await self.redis.hmset_dict(self.rate_limit_key, rate_limit_info)
+                # Add the current request time to the sorted set
+                self.redis.zadd(self.rate_limit_key, {user_id: current_time})
                 return True
         except Exception as e:
             # Handle rate limit check errors gracefully
@@ -162,5 +157,3 @@ class EmojiCog(commands.Cog):
                 else:
                     await ctx.send("Failed to fetch the emoji page.")
 
-def setup(bot):
-    bot.add_cog(EmojiCog(bot))
