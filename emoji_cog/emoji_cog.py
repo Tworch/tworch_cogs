@@ -1,12 +1,13 @@
 import discord
-from redbot.core import commands, checks, Config
+from redbot.core import commands, Config
 import aiohttp
 from bs4 import BeautifulSoup
 import re
 from urllib.parse import urlparse, urljoin
 import asyncio
 import json
-import time  # Import the time module
+import time
+import aioredis
 
 # Constants for rate limiting (adjust as needed)
 RATE_LIMIT_SECONDS = 60  # Rate limit window in seconds
@@ -15,19 +16,27 @@ MAX_REQUESTS_PER_WINDOW = 5  # Maximum requests allowed per window
 class EmojiCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=1234567890)  # Change the identifier to a unique value
+        self.config = Config.get_conf(self, identifier=7465947364)  # Change the identifier to a unique value
         self.config.register_guild(allowed_roles=[])
-        self.rate_limit = {}  # Rate limit dictionary
-
+        
+        # Rate limiting using Redis
+        self.redis = None
+        self.rate_limit_key = "emoji_cog_rate_limit"
+        
         self.session = aiohttp.ClientSession()
 
     async def cog_unload(self):
         await self.session.close()
+        if self.redis:
+            await self.redis.close()
 
     def is_valid_url(self, url):
         try:
             parsed_url = urlparse(url)
-            return all([parsed_url.scheme, parsed_url.netloc])
+            # Ensure the URL has a scheme (http, https) and a network location (domain)
+            if parsed_url.scheme not in {"http", "https"}:
+                return False
+            return bool(parsed_url.netloc)
         except ValueError:
             return False
 
@@ -51,27 +60,45 @@ class EmojiCog(commands.Cog):
             await ctx.send(f"Image size exceeds the limit (max {max_file_size / 1024} KB).")
             return False
 
-        # Add more security checks here as needed
+        # Additional security check: Ensure that the image data is indeed an image
+        if not emoji_data.startswith(b'\xFF\xD8\xFF\xE0'):
+            await ctx.send("Invalid image format.")
+            return False
+
+        # Additional security check: Detect and reject images with malicious content (e.g., inappropriate content)
+        # You may need to implement a more advanced image analysis library for this
+        # For example, consider using a service like the Microsoft Azure Computer Vision API
+
+        # Add more advanced security checks here as needed
 
         return True
 
     async def check_rate_limit(self, ctx):
+        if not self.redis:
+            return True
+        
         user_id = ctx.author.id
         current_time = time.time()
-        user_rate_limit = self.rate_limit.get(user_id, [])
         
-        # Remove requests that are older than the rate limit window
-        user_rate_limit = [t for t in user_rate_limit if current_time - t <= RATE_LIMIT_SECONDS]
-        
-        if len(user_rate_limit) >= MAX_REQUESTS_PER_WINDOW:
-            # User has reached the rate limit
-            await ctx.send(f"You have reached the rate limit. Try again in {RATE_LIMIT_SECONDS} seconds.")
-            return False
-        else:
-            # Add the current request time to the user's rate limit list
-            user_rate_limit.append(current_time)
-            self.rate_limit[user_id] = user_rate_limit
-            return True
+        try:
+            rate_limit_info = await self.redis.hgetall(self.rate_limit_key, encoding="utf-8")
+            
+            # Remove requests that are older than the rate limit window
+            rate_limit_info = {k: float(v) for k, v in rate_limit_info.items() if current_time - float(v) <= RATE_LIMIT_SECONDS}
+            
+            if len(rate_limit_info) >= MAX_REQUESTS_PER_WINDOW:
+                # User has reached the rate limit
+                await ctx.send(f"You have reached the rate limit. Try again in {RATE_LIMIT_SECONDS} seconds.")
+                return False
+            else:
+                # Add the current request time to the user's rate limit list
+                rate_limit_info[user_id] = current_time
+                await self.redis.hmset_dict(self.rate_limit_key, rate_limit_info)
+                return True
+        except Exception as e:
+            # Handle rate limit check errors gracefully
+            await ctx.send(f"Rate limit check failed: {e}")
+            return True  # Continue if there's an issue with Redis
 
     @commands.group()
     async def emoji(self, ctx):
@@ -134,38 +161,6 @@ class EmojiCog(commands.Cog):
                         await ctx.send("Emoji not found on the page.")
                 else:
                     await ctx.send("Failed to fetch the emoji page.")
-
-    async def add_allowed_role(self, ctx, role_id):
-        guild_settings = self.config.guild(ctx.guild)
-        allowed_roles = await guild_settings.allowed_roles()
-        if role_id not in allowed_roles:
-            allowed_roles.append(role_id)
-            await guild_settings.allowed_roles.set(allowed_roles)
-            await ctx.send("Role has been added to the allowed roles list.")
-        else:
-            await ctx.send("Role is already in the allowed roles list.")
-
-    async def remove_allowed_role(self, ctx, role_id):
-        guild_settings = self.config.guild(ctx.guild)
-        allowed_roles = await guild_settings.allowed_roles()
-        if role_id in allowed_roles:
-            allowed_roles.remove(role_id)
-            await guild_settings.allowed_roles.set(allowed_roles)
-            await ctx.send("Role has been removed from the allowed roles list.")
-        else:
-            await ctx.send("Role is not in the allowed roles list.")
-
-    @commands.command()
-    @checks.is_owner()
-    async def allowrole(self, ctx, role: discord.Role):
-        """Allow a role to use emoji commands."""
-        await self.add_allowed_role(ctx, role.id)
-
-    @commands.command()
-    @checks.is_owner()
-    async def disallowrole(self, ctx, role: discord.Role):
-        """Disallow a role from using emoji commands."""
-        await self.remove_allowed_role(ctx, role.id)
 
 def setup(bot):
     bot.add_cog(EmojiCog(bot))
