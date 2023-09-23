@@ -1,14 +1,16 @@
 import json
 import aiohttp
-import discord
+import os
+from redbot.core import checks
 from bs4 import BeautifulSoup
-from redbot.core import commands, checks
+import discord
+from redbot.core import commands, app_commands
 
 class EmojiCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.session = aiohttp.ClientSession()
-        self.role_config_file = "roles_config.json"
+        self.role_config_file = os.path.join(os.path.dirname(__file__), "roles_config.json")
         self.load_roles()
 
     def load_roles(self):
@@ -22,55 +24,46 @@ class EmojiCog(commands.Cog):
         with open(self.role_config_file, "w") as f:
             json.dump(self.allowed_roles, f)
 
-    @commands.slash(
-        name="listroles",
-        description="List roles that can use the getemoji command."
-    )
-    async def slash_listroles(self, ctx):
-        roles = ', '.join([str(role_id) for role_id in self.allowed_roles.get(str(ctx.guild.id), [])])
-        await ctx.send(f"Roles allowed to use `getemoji`: {roles}")
-
-    @commands.command(name='addrole')
+    @commands.command()
     @checks.is_owner()
-    async def emoji_addrole(self, ctx, role: discord.Role):
+    async def addemojirule(self, ctx, role_id: int):
         guild_id = str(ctx.guild.id)
         if guild_id not in self.allowed_roles:
             self.allowed_roles[guild_id] = []
-        self.allowed_roles[guild_id].append(role.id)
+        self.allowed_roles[guild_id].append(role_id)
         self.save_roles()
-        await ctx.send(f"Role `{role.name}` added.")
+        await ctx.send(f"Role {role_id} added.")
 
-    @commands.command(name='removerole')
+    @commands.command()
     @checks.is_owner()
-    async def emoji_removerole(self, ctx, role: discord.Role):
+    async def removeemojirule(self, ctx, role_id: int):
         guild_id = str(ctx.guild.id)
-        if guild_id in self.allowed_roles and role.id in self.allowed_roles[guild_id]:
-            self.allowed_roles[guild_id].remove(role.id)
+        if guild_id in self.allowed_roles and role_id in self.allowed_roles[guild_id]:
+            self.allowed_roles[guild_id].remove(role_id)
             self.save_roles()
-            await ctx.send(f"Role `{role.name}` removed.")
+            await ctx.send(f"Role {role_id} removed.")
         else:
-            await ctx.send(f"Role `{role.name}` was not found in the list of allowed roles.")
+            await ctx.send(f"Role {role_id} was not found in the list of allowed roles.")
 
-    @commands.slash(
-        name="getemoji",
-        description="Fetch and add an emoji to the server."
-    )
-    async def slash_getemoji(self, ctx, emoji_name_or_url: str):
-        guild_id = str(ctx.guild.id)
+    @app_commands.command()
+    async def getemoji(self, interaction: discord.Interaction, emoji_name_or_url: str):
+        await interaction.response.defer(ephemeral=True)
+        guild_id = str(interaction.guild_id)
 
         if guild_id in self.allowed_roles:
-            user_role_ids = [role.id for role in ctx.author.roles]
+            user_role_ids = [role.id for role in interaction.user.roles]
             if not any(role_id in user_role_ids for role_id in self.allowed_roles[guild_id]):
-                await ctx.send("You do not have permission to use this command.")
+                await interaction.followup.send("You do not have permission to use this command.", ephemeral=True)
                 return
         else:
-            await ctx.send("No roles have been set to use this command.")
+            await interaction.followup.send("No roles have been set to use this command.", ephemeral=True)
             return
 
         async with self.session.get(emoji_name_or_url) as resp:
             if resp.status != 200:
-                await ctx.send("Failed to fetch the webpage.")
+                await interaction.followup.send("Failed to fetch the webpage.", ephemeral=True)
                 return
+
             soup = BeautifulSoup(await resp.text(), 'html.parser')
             emoji_div = soup.find("div", {"class": "card-body emoji-pad"})
             if emoji_div:
@@ -79,14 +72,21 @@ class EmojiCog(commands.Cog):
                     emoji_url = emoji_tag['src']
                     if not emoji_url.startswith('https://'):
                         emoji_url = "https://emoji.gg" + emoji_url
+
                     async with self.session.get(emoji_url) as img_resp:
                         if img_resp.status != 200:
-                            await ctx.send("Failed to download the emoji.")
+                            await interaction.followup.send("Failed to download the emoji.", ephemeral=True)
                             return
+
                         image_data = await img_resp.read()
-                        await ctx.guild.create_custom_emoji(name=emoji_name_or_url.split('/')[-1], image=image_data)
-                        await ctx.send(f"Emoji added successfully.")
+
+                        # Validate and sanitize the emoji name
+                        emoji_name = emoji_name_or_url.split('/')[-1]
+                        emoji_name = ''.join(e for e in emoji_name if e.isalnum() or e == '_')
+
+                        await interaction.guild.create_custom_emoji(name=emoji_name, image=image_data)
+                        await interaction.followup.send(f"Emoji added successfully.")
                 else:
-                    await ctx.send("Could not find the emoji on the webpage.")
+                    await interaction.followup.send("Could not find the emoji on the webpage.", ephemeral=True)
             else:
-                await ctx.send("Failed to parse the webpage.")
+                await interaction.followup.send("Failed to parse the webpage.", ephemeral=True)
