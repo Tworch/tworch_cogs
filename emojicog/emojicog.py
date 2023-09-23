@@ -3,10 +3,13 @@ import aiohttp
 import discord
 from bs4 import BeautifulSoup
 from redbot.core import commands, checks
+from discord_slash import cog_ext, SlashContext
+from discord_slash.utils.manage_commands import create_option
 
 class EmojiCog(commands.Cog):
-    def __init__(self, bot):
+    def __init__(self, bot, slash):
         self.bot = bot
+        self.slash = slash
         self.session = aiohttp.ClientSession()
         self.role_config_file = "roles_config.json"
         self.load_roles()
@@ -22,18 +25,41 @@ class EmojiCog(commands.Cog):
         with open(self.role_config_file, "w") as f:
             json.dump(self.allowed_roles, f)
 
-    @commands.group()
-    async def emoji(self, ctx):
-        """Emoji related commands."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send('Invalid emoji command passed...')
+    @cog_ext.cog_slash(
+        name="emoji",
+        description="Emoji related commands.",
+        options=[
+            create_option(
+                name="action",
+                description="What action do you want to perform?",
+                option_type=3,
+                required=True,
+                choices=["listroles", "get"]
+            ),
+            create_option(
+                name="emoji_name_or_url",
+                description="Emoji name or URL, if action is get",
+                option_type=3,
+                required=False
+            )
+        ]
+    )
+    async def _emoji(self, ctx: SlashContext, action: str, emoji_name_or_url: str = None):
+        if action == "listroles":
+            await self.emoji_listroles(ctx)
+        elif action == "get":
+            if emoji_name_or_url:
+                await self.emoji_get(ctx, emoji_name_or_url)
+            else:
+                await ctx.send("Please specify an emoji name or URL.")
+        else:
+            await ctx.send("Invalid action.")
 
-    @emoji.command(name='listroles')
     async def emoji_listroles(self, ctx):
         roles = ', '.join([str(role_id) for role_id in self.allowed_roles.get(str(ctx.guild.id), [])])
         await ctx.send(f"Roles allowed to use `getemoji`: {roles}")
 
-    @emoji.command(name='addrole')
+    @commands.command(name='addrole')
     @checks.is_owner()
     async def emoji_addrole(self, ctx, role: discord.Role):
         guild_id = str(ctx.guild.id)
@@ -43,7 +69,7 @@ class EmojiCog(commands.Cog):
         self.save_roles()
         await ctx.send(f"Role `{role.name}` added.")
 
-    @emoji.command(name='removerole')
+    @commands.command(name='removerole')
     @checks.is_owner()
     async def emoji_removerole(self, ctx, role: discord.Role):
         guild_id = str(ctx.guild.id)
@@ -54,10 +80,9 @@ class EmojiCog(commands.Cog):
         else:
             await ctx.send(f"Role `{role.name}` was not found in the list of allowed roles.")
 
-    @emoji.command(name='get')
     async def emoji_get(self, ctx, emoji_name_or_url: str):
         guild_id = str(ctx.guild.id)
-
+        
         # Check role-based restriction
         if guild_id in self.allowed_roles:
             user_role_ids = [role.id for role in ctx.author.roles]
